@@ -653,7 +653,10 @@ async function run() {
   // fixture daemon, whose request counter backs the Task-1 rows. One mode
   // switches the failure surface per scenario.
   let modelsMode = 'ok'
-  const staticModelInfos = () => MODELS_FIXTURE.map((m) => ({
+  // Built from the SHIPPED static table, not the historical fixture: the
+  // table is now the offline floor (metadata for ids whose limits are not
+  // discoverable on the wire), so the fallback assertion must track it.
+  const staticModelInfos = () => fixture.plugin.MODELS.map((m) => ({
     provider: TEST_PROVIDER,
     id: m.id,
     name: m.name,
@@ -740,10 +743,16 @@ async function run() {
       "apply() must subscribe to no events (ctx.on('llm/stream') and the Task-6 health listener are gone/Task 6-owned)")
   })
 
-  check('[Task 2] MODELS deep-equals the committed a416790 fixture; table vocabulary only (no output-only fields)', () => {
+  check('[Task 2] the STATIC table carries only metadata-pinning entries, inside the vocabulary', () => {
+    // The table shrank on purpose: it is the METADATA source now, not the
+    // model list. The list is served by the daemon (liveModelInfos), so this
+    // table only holds ids whose real limits cannot be discovered on the wire
+    // (mimo's non-default effort ladder, nvidia's 1M-class windows).
     const table = fixture.plugin.MODELS
-    assert.strictEqual(table.length, 9, 'the a416790 table carries 9 entries')
-    assert.deepStrictEqual(table, MODELS_FIXTURE, 'MODELS must stay byte-equal to the committed fixture')
+    assert.ok(table.length > 0 && table.length < 9, `the static table is a subset, got ${table.length} entries`)
+    assert.ok(table.some((m) => m.id === 'mimo-v2.6-flash-free'), 'mimo must stay pinned: its effort ladder is non-default')
+    assert.ok(table.some((m) => m.id === 'nemotron-3-ultra-free'), 'the nvidia entries must stay pinned: their windows are not on the wire')
+    assert.ok(!table.some((m) => m.id === 'ling-3.0-flash-fin-free'), 'a model absent from the live catalog must not be pinned')
     const vocabulary = ['id', 'name', 'contextWindow', 'maxOutput', 'description', 'vision', 'efforts', 'responses', 'reasoningRequired']
     for (const entry of table) {
       for (const key of Object.keys(entry)) {
@@ -763,7 +772,7 @@ async function run() {
     assert.deepStrictEqual(mimo.inputModalities, ['text', 'image'], 'vision → image input modality')
     assert.deepStrictEqual(mimo.context, { contextWindow: 200000 })
     assert.strictEqual(mimo.defaultMaxTokens, 32000, 'maxOutput → defaultMaxTokens')
-    assert.deepStrictEqual(mimo.reasoning.efforts.map((level) => level.id), ['off', 'low', 'medium', 'high'], 'efforts → reasoning.efforts')
+    assert.deepStrictEqual(mimo.reasoning.efforts.map((level) => level.id), ['off', 'low', 'medium', 'high'], 'efforts → reasoning.efforts (mimo has no "max": the ladder is pinned, not defaulted)')
     assert.strictEqual(mimo.reasoning.defaultEffort, 'high', 'DEFAULT_REASONING → defaultEffort')
     for (const level of mimo.reasoning.efforts) {
       assert.strictEqual(typeof level.name, 'string')
@@ -771,9 +780,18 @@ async function run() {
       assert.strictEqual(typeof level.description, 'string')
       assert.ok(level.description.length > 0)
     }
-    const bunny = await fixture.adapter.resolveModel(TEST_PROVIDER, 'space-bunny-free')
-    assert.deepStrictEqual(bunny.reasoning.efforts.map((level) => level.id), ['low', 'medium', 'high', 'xhigh', 'max'])
-    assert.strictEqual(bunny.defaultMaxTokens, 524288, 'space-bunny maxOutput → defaultMaxTokens')
+    // nemotron: the other pinned shape — a 1M-class window with a large
+    // output ceiling, neither of which is discoverable on the wire.
+    const nemotron = await fixture.adapter.resolveModel(TEST_PROVIDER, 'nemotron-3-ultra-free')
+    assert.strictEqual(nemotron.context.contextWindow, 1000000, 'nemotron context → context.contextWindow')
+    assert.strictEqual(nemotron.defaultMaxTokens, 128000, 'nemotron maxOutput → defaultMaxTokens')
+    assert.deepStrictEqual(nemotron.inputModalities, ['text'], 'no vision flag → text only')
+    // A model the daemon serves but the static table does not pin: metadata
+    // falls back to the defaults, and that is the DESIGNED behaviour — the
+    // model must stay usable, not be rejected for having no entry.
+    const unpinned = await fixture.adapter.resolveModel(TEST_PROVIDER, 'space-bunny-free')
+    assert.strictEqual(unpinned.name, 'space-bunny-free', 'an unpinned id still resolves, name falling back to the id')
+    assert.strictEqual(unpinned.defaultMaxTokens, 32000, 'an unpinned id uses DEFAULT_MAX_TOKENS')
     const unknown = await fixture.adapter.resolveModel(TEST_PROVIDER, 'zen-unknown-model')
     assert.strictEqual(unknown.name, 'zen-unknown-model', 'unknown id: name falls back to the id')
     assert.deepStrictEqual(unknown.inputModalities, ['text'])
@@ -836,11 +854,12 @@ async function run() {
     }
   })
 
-  await checkAsync('[Task 2] listModels: daemon down → the static 9 with declared modalities (never rejects)', async () => {
+  await checkAsync('[Task 2] listModels: daemon down → the static table with declared modalities (never rejects)', async () => {
     const dead = await closedPort()
     const downAdapter = loadAdapter(`http://127.0.0.1:${dead}`).adapter
     const models = await downAdapter.listModels(TEST_PROVIDER)
     assert.deepStrictEqual(models, staticModelInfos())
+    assert.strictEqual(models.length, fixture.plugin.MODELS.length, 'the offline floor is the static table')
   })
 
   await checkAsync('[Task 2] listModels live refresh: GET /v1/models — live ids added, static metadata wins, live list replaces', async () => {
@@ -862,7 +881,7 @@ async function run() {
     modelsMode = 'ok'
   })
 
-  await checkAsync('[Task 2] listModels never rejects: every refresh failure (HTTP, body, shape, timeout, refused) falls back to the static 9', async () => {
+  await checkAsync('[Task 2] listModels never rejects: every refresh failure falls back to the static table', async () => {
     const expected = staticModelInfos()
     for (const mode of ['fivehundred', 'garbage-json', 'wrong-shape', 'empty', 'partial', 'hang', 'guard428']) {
       modelsMode = mode
@@ -1390,6 +1409,120 @@ async function run() {
     }
     assert.deepStrictEqual(spawns, ['zen-router up --detach'], 'aborted ping = failure → gated spawn recorded')
   })
+
+  // --- remote gateway (mode=server): the bearer reaches EVERY call --------
+  //
+  // The second deployment shape is the agent here and the gateway on a server.
+  // A mode=server daemon wraps BOTH surfaces (/v1/* and /_zenctl/*) in the same
+  // token check, so a request without the header answers 401 — including the
+  // model catalog read and the health ping, which used to send no credentials
+  // at all. These checks pin that the token is attached to the reads too, not
+  // just to the chat POST.
+  console.log('\n[remote gateway: OPENCODE_ZEN_TOKEN reaches reads and writes]')
+  {
+    const seen = [] // every request the fake remote gateway receives
+    const remote = http.createServer((req, res) => {
+      let raw = ''
+      req.on('data', (piece) => { raw += piece })
+      req.on('end', () => {
+        seen.push({ method: req.method, path: req.url, auth: req.headers.authorization })
+        // Model the daemon's own middleware: no bearer → 401, exactly as
+        // cli.RequireToken answers.
+        if (req.headers.authorization !== 'Bearer remote-secret') {
+          res.writeHead(401, { 'content-type': 'application/json' })
+          return res.end('{"error":{"message":"zen: missing or invalid bearer token","type":"AuthenticationError"}}')
+        }
+        if (req.method === 'GET' && req.url === '/v1/models') {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          return res.end(JSON.stringify({ object: 'list', data: [{ id: 'mimo-v2.6-flash-free', object: 'model' }] }))
+        }
+        if (req.method === 'POST' && req.url === '/v1/chat/completions') {
+          res.writeHead(200, { 'content-type': 'text/event-stream' })
+          res.write('data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}\n\n')
+          res.write('data: [DONE]\n\n')
+          return res.end()
+        }
+        if (req.method === 'GET' && req.url === '/_zenctl/status') {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          return res.end('{}')
+        }
+        res.writeHead(404)
+        res.end('{}')
+      })
+    })
+    await listen(remote)
+    const remoteBase = `http://127.0.0.1:${remote.address().port}`
+
+    const prevToken = process.env.OPENCODE_ZEN_TOKEN
+    try {
+      process.env.OPENCODE_ZEN_TOKEN = 'remote-secret'
+      const { adapter } = loadAdapter(remoteBase)
+
+      // The catalog read must authenticate: without the header it 401s and
+      // listModels() silently falls back to the static table, so a broken
+      // token would look like "the catalog is just short".
+      const models = await adapter.listModels({ provider: TEST_PROVIDER })
+      check('[remote] GET /v1/models carries the gateway token and is served', () => {
+        const call = seen.find((entry) => entry.path === '/v1/models')
+        assert.ok(call, 'the catalog read never reached the gateway')
+        assert.strictEqual(call.auth, 'Bearer remote-secret', 'the catalog read must send the bearer')
+        assert.ok(Array.isArray(models) && models.length > 0, 'the catalog must be served, not fall back')
+      })
+
+      // And so must the chat POST.
+      const chunks = []
+      for await (const chunk of adapter.stream(baseOptions())) chunks.push(chunk)
+      check('[remote] POST /v1/chat/completions carries the gateway token and streams', () => {
+        const call = seen.find((entry) => entry.path === '/v1/chat/completions')
+        assert.ok(call, 'the chat POST never reached the gateway')
+        assert.strictEqual(call.auth, 'Bearer remote-secret', 'the chat POST must send the bearer')
+        // The adapter emits `text-delta` while streaming (translate() opens a
+        // block on the first delta of a kind), so that is the chunk to look
+        // for — asserting on a bare `text` would never match.
+        assert.ok(chunks.some((chunk) => chunk.type === 'text-delta' && chunk.text === 'hi'),
+          `the stream must carry the delta; got ${JSON.stringify(chunks.map((c) => c.type))}`)
+      })
+    } finally {
+      if (prevToken === undefined) delete process.env.OPENCODE_ZEN_TOKEN
+      else process.env.OPENCODE_ZEN_TOKEN = prevToken
+      remote.closeAllConnections()
+      await new Promise((resolve) => remote.close(resolve))
+    }
+  }
+
+  // A loopback daemon (mode=local) performs no check, so the default must be
+  // NO authorization header: sending one would be harmless today but would
+  // break the moment a user's local daemon ran with a token it never told the
+  // adapter about.
+  {
+    const seen = []
+    const loopback = http.createServer((req, res) => {
+      seen.push({ path: req.url, auth: req.headers.authorization })
+      if (req.url === '/v1/models') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        return res.end(JSON.stringify({ object: 'list', data: [{ id: 'mimo-v2.6-flash-free', object: 'model' }] }))
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{}')
+    })
+    await listen(loopback)
+    const prevToken = process.env.OPENCODE_ZEN_TOKEN
+    try {
+      delete process.env.OPENCODE_ZEN_TOKEN
+      const { adapter } = loadAdapter(`http://127.0.0.1:${loopback.address().port}`)
+      await adapter.listModels({ provider: TEST_PROVIDER })
+      check('[remote] no OPENCODE_ZEN_TOKEN → no Authorization header (mode=local contract)', () => {
+        assert.ok(seen.length > 0, 'the daemon was never called')
+        for (const call of seen) {
+          assert.strictEqual(call.auth, undefined, `unexpected Authorization on ${call.path}`)
+        }
+      })
+    } finally {
+      if (prevToken !== undefined) process.env.OPENCODE_ZEN_TOKEN = prevToken
+      loopback.closeAllConnections()
+      await new Promise((resolve) => loopback.close(resolve))
+    }
+  }
 
   await new Promise((resolve) => {
     server.closeAllConnections()
