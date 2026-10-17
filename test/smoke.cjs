@@ -122,6 +122,21 @@ function testAdapter() {
     assert.strictEqual(adapter.imageRequestPricing(), undefined)
   })
 
+  check('providerRetryPolicy объявлен и разрешён', () => {
+    // Харнесс вызывает метод без проверки наличия, а возвращённую политику
+    // берёт как есть. Значит проверяется не только присутствие, но и то, что
+    // паузы лежат на верхнем уровне: вложенный backoff читается как их
+    // отсутствие, и повторы идут подряд.
+    const policy = createAdapter(stubCtx, 'opencode').providerRetryPolicy()
+    assert.strictEqual(policy.mode, 'normal')
+    assert.strictEqual(policy.maxRetries, 5)
+    assert.ok(Array.isArray(policy.retryableCodes) && policy.retryableCodes.length > 0)
+    assert.ok(!policy.retryableCodes.includes('POLICY'), 'устойчивый отказ не повторяется')
+    assert.ok(policy.backoff.initialDelayMs > 0, 'пауза не разрешена')
+    assert.ok(policy.backoff.maxDelayMs >= policy.backoff.initialDelayMs)
+    assert.ok(policy.backoff.jitterRatio >= 0 && policy.backoff.jitterRatio <= 1)
+  })
+
   check('метаданные модели содержат обязательные поля', () => {
     const info = createAdapter(stubCtx, 'opencode').modelInfo('модель')
     assert.strictEqual(info.provider, 'opencode')
