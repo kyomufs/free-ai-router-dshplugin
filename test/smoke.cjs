@@ -122,19 +122,35 @@ function testAdapter() {
     assert.strictEqual(adapter.imageRequestPricing(), undefined)
   })
 
-  check('providerRetryPolicy объявлен и разрешён', () => {
-    // Харнесс вызывает метод без проверки наличия, а возвращённую политику
-    // берёт как есть. Значит проверяется не только присутствие, но и то, что
-    // паузы лежат на верхнем уровне: вложенный backoff читается как их
-    // отсутствие, и повторы идут подряд.
+  check('providerRetryPolicy объявлен', () => {
+    // Харнесс вызывает метод без проверки наличия: его отсутствие роняет
+    // регистрацию маршрута целиком, а не оставляет политику по умолчанию.
     const policy = createAdapter(stubCtx, 'opencode').providerRetryPolicy()
     assert.strictEqual(policy.mode, 'normal')
     assert.strictEqual(policy.maxRetries, 5)
     assert.ok(Array.isArray(policy.retryableCodes) && policy.retryableCodes.length > 0)
     assert.ok(!policy.retryableCodes.includes('POLICY'), 'устойчивый отказ не повторяется')
-    assert.ok(policy.backoff.initialDelayMs > 0, 'пауза не разрешена')
-    assert.ok(policy.backoff.maxDelayMs >= policy.backoff.initialDelayMs)
-    assert.ok(policy.backoff.jitterRatio >= 0 && policy.backoff.jitterRatio <= 1)
+  })
+
+  check('паузы повторов лежат на верхнем уровне', () => {
+    // Планировщик повторов ожидает РАЗРЕШЁННУЮ политику и читает паузы прямо
+    // из неё. Вложенный backoff он не разворачивает: задержка считается по
+    // NaN, и повторы идут подряд. Проверяется поэтому и наличие значений, и
+    // отсутствие вложенного объекта — второе означало бы, что кто-то вернул
+    // описательную форму.
+    const policy = createAdapter(stubCtx, 'opencode').providerRetryPolicy()
+    assert.strictEqual(policy.backoff, undefined, 'вернулась описательная форма')
+    assert.ok(policy.initialDelayMs > 0, 'пауза не разрешена')
+    assert.ok(policy.maxDelayMs >= policy.initialDelayMs)
+    assert.ok(policy.jitterRatio >= 0 && policy.jitterRatio <= 1)
+
+    // Тот же расчёт, что делает dsh-llm-retry: задержка обязана быть конечной
+    // на всей лестнице повторов.
+    for (let retry = 1; retry <= policy.maxRetries; retry++) {
+      const exponential = Math.min(policy.initialDelayMs * 2 ** (retry - 1), policy.maxDelayMs)
+      const delay = Math.min(exponential, policy.maxDelayMs)
+      assert.ok(Number.isFinite(delay) && delay > 0, `повтор ${retry}: задержка ${delay}`)
+    }
   })
 
   check('метаданные модели содержат обязательные поля', () => {
