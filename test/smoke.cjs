@@ -1,14 +1,15 @@
 'use strict'
 
-// Проверки плагина free-ai-router-plugin.
+// Checks for the free-ai-router-plugin.
 //
-// ЧТО ПРОВЕРЯЕТСЯ. Плагин — посредник между харнессом и шлюзом. Значит
-// проверяются ровно границы: как он понимает каталог шлюза, как переводит
-// сообщения и как передаёт отказ. Остальное — работа демона, и её проверяет он.
+// WHAT IS CHECKED. The plugin is an intermediary between the harness and the
+// gateway. So exactly the boundaries are checked: how it understands the
+// gateway catalog, how it translates messages, and how it passes refusals
+// through. The rest is the daemon's work, and the daemon checks it.
 //
-// ЧЕГО ЗДЕСЬ НЕТ. Проверок формы запроса к провайдеру и обхода проверок: этим
-// занимается шлюз, и дублировать его решения здесь значило бы завести второе
-// место, где то же самое делается иначе.
+// WHAT IS NOT HERE. Checks of the request shape sent to a provider and of
+// bypassing checks: the gateway does that, and duplicating its decisions here
+// would mean creating a second place where the same thing is done differently.
 
 const assert = require('node:assert')
 
@@ -33,20 +34,20 @@ async function checkAsync(label, fn) {
   }
 }
 
-// splitModelId — разбивка составного идентификатора по ПЕРВОМУ слэшу.
+// splitModelId — splitting a composite identifier at the FIRST slash.
 //
-// Продублирована намеренно: проверка обязана утверждать ФОРМУ, а не повторять
-// реализацию. Если реализация изменится, проверка это заметит.
+// Duplicated on purpose: a check must assert the SHAPE, not repeat the
+// implementation. If the implementation changes, the check will notice.
 function splitModelId(composite) {
   const slash = composite.indexOf('/')
   if (slash <= 0) return null
   return { provider: composite.slice(0, slash), model: composite.slice(slash + 1) }
 }
 
-// stubCtx — подставной контекст харнесса.
+// stubCtx — a stand-in harness context.
 const stubCtx = { get: () => undefined, logger: { info() {}, warn() {} } }
 
-// streamOf собирает поток кадров для проверок разбора.
+// streamOf assembles a stream of frames for the parsing checks.
 function streamOf(frames) {
   const body = new ReadableStream({
     start(controller) {
@@ -58,12 +59,12 @@ function streamOf(frames) {
   return { body }
 }
 
-// frame собирает один кадр события.
+// frame assembles a single event frame.
 function frame(payload) {
   return `data: ${JSON.stringify(payload)}\n\n`
 }
 
-// drain собирает события потока в массив.
+// drain collects the stream's events into an array.
 async function drain(response) {
   const { parseSse } = require('../lib/sse.cjs')
   const out = []
@@ -71,99 +72,101 @@ async function drain(response) {
   return out
 }
 
-// --- каталог шлюза ---
+// --- gateway catalog ---
 
 function testCatalog() {
   for (const [composite, provider, model] of [
     ['opencode/mimo-v2.6-flash-free', 'opencode', 'mimo-v2.6-flash-free'],
-    // Слэш внутри идентификатора модели обязан остаться в модели.
+    // A slash inside a model identifier must stay in the model.
     ['openrouter/poolside/laguna-s-2.1:free', 'openrouter', 'poolside/laguna-s-2.1:free'],
   ]) {
-    check(`составной id «${composite}» разбирается`, () => {
+    check(`composite id "${composite}" is split`, () => {
       const got = splitModelId(composite)
-      assert.ok(got, 'идентификатор не разобран')
+      assert.ok(got, 'identifier was not split')
       assert.strictEqual(got.provider, provider)
       assert.strictEqual(got.model, model)
     })
   }
 
-  check('идентификатор без провайдера отвергается', () => {
-    assert.strictEqual(splitModelId('модель'), null)
-    assert.strictEqual(splitModelId('/модель'), null)
+  check('an identifier without a provider is rejected', () => {
+    assert.strictEqual(splitModelId('model'), null)
+    assert.strictEqual(splitModelId('/model'), null)
   })
 
-  check('модуль общения отдаёт нужное', () => {
+  check('the communication module exports what is needed', () => {
     const daemon = require('../lib/daemon.cjs')
     for (const name of ['BASE', 'headers', 'listProviders', 'ping']) {
-      assert.ok(name in daemon, `нет экспорта ${name}`)
+      assert.ok(name in daemon, `missing export ${name}`)
     }
   })
 
-  check('заголовки собираются по требованию', () => {
+  check('headers are assembled on demand', () => {
     const daemon = require('../lib/daemon.cjs')
     assert.strictEqual(daemon.headers(false)['content-type'], undefined)
     assert.strictEqual(daemon.headers(true)['content-type'], 'application/json')
   })
 }
 
-// --- адаптер ---
+// --- adapter ---
 
 function testAdapter() {
   const { createAdapter, DEFAULT_EFFORTS } = require('../lib/adapter.cjs')
 
-  check('адаптер создаётся под своим провайдером', () => {
+  check('the adapter is created for its own provider', () => {
     assert.strictEqual(createAdapter(stubCtx, 'zenmux').providerInfo('zenmux').id, 'zenmux')
   })
 
-  check('imageRequestPricing объявлен', () => {
-    // Метод обязателен: измеритель токенов вызывает его без проверки наличия.
+  check('imageRequestPricing is declared', () => {
+    // The method is mandatory: the token meter calls it without checking
+    // whether it exists.
     const adapter = createAdapter(stubCtx, 'opencode')
     assert.strictEqual(typeof adapter.imageRequestPricing, 'function')
     assert.strictEqual(adapter.imageRequestPricing(), undefined)
   })
 
-  check('providerRetryPolicy объявлен', () => {
-    // Харнесс вызывает метод без проверки наличия: его отсутствие роняет
-    // регистрацию маршрута целиком, а не оставляет политику по умолчанию.
+  check('providerRetryPolicy is declared', () => {
+    // The harness calls the method without checking whether it exists: its
+    // absence breaks route registration entirely rather than leaving the
+    // default policy in place.
     const policy = createAdapter(stubCtx, 'opencode').providerRetryPolicy()
     assert.strictEqual(policy.mode, 'normal')
     assert.strictEqual(policy.maxRetries, 5)
     assert.ok(Array.isArray(policy.retryableCodes) && policy.retryableCodes.length > 0)
-    assert.ok(!policy.retryableCodes.includes('POLICY'), 'устойчивый отказ не повторяется')
+    assert.ok(!policy.retryableCodes.includes('POLICY'), 'a stable refusal is not retried')
   })
 
-  check('паузы повторов лежат на верхнем уровне', () => {
-    // Планировщик повторов ожидает РАЗРЕШЁННУЮ политику и читает паузы прямо
-    // из неё. Вложенный backoff он не разворачивает: задержка считается по
-    // NaN, и повторы идут подряд. Проверяется поэтому и наличие значений, и
-    // отсутствие вложенного объекта — второе означало бы, что кто-то вернул
-    // описательную форму.
+  check('retry delays sit on the top level', () => {
+    // The retry scheduler expects a RESOLVED policy and reads the delays
+    // straight from it. It does not unwrap a nested backoff: the delay is
+    // computed from NaN, and retries run back to back. That is why both the
+    // presence of values and the absence of the nested object are checked —
+    // the latter would mean someone returned the descriptive form.
     const policy = createAdapter(stubCtx, 'opencode').providerRetryPolicy()
-    assert.strictEqual(policy.backoff, undefined, 'вернулась описательная форма')
-    assert.ok(policy.initialDelayMs > 0, 'пауза не разрешена')
+    assert.strictEqual(policy.backoff, undefined, 'the descriptive form was returned')
+    assert.ok(policy.initialDelayMs > 0, 'the delay was not resolved')
     assert.ok(policy.maxDelayMs >= policy.initialDelayMs)
     assert.ok(policy.jitterRatio >= 0 && policy.jitterRatio <= 1)
 
-    // Тот же расчёт, что делает dsh-llm-retry: задержка обязана быть конечной
-    // на всей лестнице повторов.
+    // The same calculation dsh-llm-retry does: the delay must be finite across
+    // the whole retry ladder.
     for (let retry = 1; retry <= policy.maxRetries; retry++) {
       const exponential = Math.min(policy.initialDelayMs * 2 ** (retry - 1), policy.maxDelayMs)
       const delay = Math.min(exponential, policy.maxDelayMs)
-      assert.ok(Number.isFinite(delay) && delay > 0, `повтор ${retry}: задержка ${delay}`)
+      assert.ok(Number.isFinite(delay) && delay > 0, `retry ${retry}: delay ${delay}`)
     }
   })
 
-  check('метаданные модели содержат обязательные поля', () => {
-    const info = createAdapter(stubCtx, 'opencode').modelInfo('модель')
+  check('model metadata contains the mandatory fields', () => {
+    const info = createAdapter(stubCtx, 'opencode').modelInfo('model')
     assert.strictEqual(info.provider, 'opencode')
-    assert.ok(info.context.contextWindow > 0, 'нет размера окна')
-    assert.ok(info.defaultMaxTokens > 0, 'нет предела ответа')
+    assert.ok(info.context.contextWindow > 0, 'no window size')
+    assert.ok(info.defaultMaxTokens > 0, 'no response limit')
     assert.ok(Array.isArray(info.inputModalities))
     assert.ok(Array.isArray(info.reasoning.efforts))
     assert.ok(info.reasoning.defaultEffort)
   })
 
-  check('лестница усилий совпадает с клиентской', () => {
+  check('the effort ladder matches the client one', () => {
     assert.deepStrictEqual(DEFAULT_EFFORTS, ['off', 'low', 'high', 'max'])
   })
 }
@@ -172,48 +175,48 @@ async function testAdapterAsync() {
   const { createAdapter } = require('../lib/adapter.cjs')
   const adapter = createAdapter(stubCtx, 'opencode')
 
-  // Незнакомая модель разрешается с умолчаниями: шлюз мог объявить её только
-  // что, а каталог плагина обновляется позже.
-  await checkAsync('незнакомая модель разрешается с умолчаниями', async () => {
-    const info = await adapter.resolveModel('opencode', 'никогда-не-слыхали')
-    assert.strictEqual(info.id, 'никогда-не-слыхали')
+  // An unfamiliar model is resolved with defaults: the gateway may have
+  // announced it only just now, while the plugin catalog refreshes later.
+  await checkAsync('an unfamiliar model is resolved with defaults', async () => {
+    const info = await adapter.resolveModel('opencode', 'never-heard-of-it')
+    assert.strictEqual(info.id, 'never-heard-of-it')
     assert.ok(info.context.contextWindow > 0)
   })
 }
 
-// --- перевод сообщений ---
+// --- message translation ---
 
 function testMessages() {
   const { serializeMessages, serializeTools } = require('../lib/stream.cjs')
 
-  check('системная часть становится отдельным сообщением', () => {
-    const messages = serializeMessages([{ role: 'user', content: 'привет' }], 'инструкции')
+  check('the system part becomes a separate message', () => {
+    const messages = serializeMessages([{ role: 'user', content: 'hello' }], 'instructions')
     assert.strictEqual(messages.length, 2)
     assert.strictEqual(messages[0].role, 'system')
     assert.strictEqual(messages[1].role, 'user')
   })
 
-  check('размышления ассистента сохраняются', () => {
-    // Поле с размышлениями нужно провайдерам, которые продолжают работу по
-    // своей же прошлой мысли: потеряв его, мы сломали бы длинные ходы.
+  check("the assistant's reasoning is preserved", () => {
+    // The reasoning field is needed by providers that continue work from their
+    // own previous thought: losing it would break long turns.
     const messages = serializeMessages(
       [{ role: 'assistant', content: [
-        { type: 'reasoning', text: 'думаю' },
-        { type: 'text', text: 'отвечаю' },
+        { type: 'reasoning', text: 'thinking' },
+        { type: 'text', text: 'answering' },
       ] }],
       '',
     )
-    assert.strictEqual(messages[0].reasoning_content, 'думаю')
-    assert.strictEqual(messages[0].content, 'отвечаю')
+    assert.strictEqual(messages[0].reasoning_content, 'thinking')
+    assert.strictEqual(messages[0].content, 'answering')
   })
 
-  check('пустой ход ассистента не отправляется', () => {
-    // Пустое сообщение ассистента на проводе недопустимо: провайдер отвергнет
-    // весь запрос из-за него.
+  check('an empty assistant turn is not sent', () => {
+    // An empty assistant message on the wire is unacceptable: the provider
+    // would reject the whole request because of it.
     assert.strictEqual(serializeMessages([{ role: 'assistant', content: [] }], '').length, 0)
   })
 
-  check('вызовы инструментов переводятся', () => {
+  check('tool calls are translated', () => {
     const messages = serializeMessages(
       [{ role: 'assistant', content: [
         { type: 'tool-call', id: 'call_1', name: 'read', arguments: '{"path":"/x"}' },
@@ -224,62 +227,62 @@ function testMessages() {
     assert.strictEqual(messages[0].tool_calls[0].function.name, 'read')
   })
 
-  check('ответ инструмента несёт свой идентификатор', () => {
-    const messages = serializeMessages([{ role: 'tool', toolCallId: 'call_1', content: 'результат' }], '')
+  check('a tool result carries its identifier', () => {
+    const messages = serializeMessages([{ role: 'tool', toolCallId: 'call_1', content: 'result' }], '')
     assert.strictEqual(messages[0].tool_call_id, 'call_1')
-    assert.strictEqual(messages[0].content, 'результат')
+    assert.strictEqual(messages[0].content, 'result')
   })
 
-  check('пустой ответ инструмента заменяется заглушкой', () => {
+  check('an empty tool result is replaced with a stub', () => {
     const messages = serializeMessages([{ role: 'tool', toolCallId: 'c', content: '' }], '')
     assert.strictEqual(messages[0].content, '(no output)')
   })
 
-  check('объявления инструментов переводятся', () => {
-    const tools = serializeTools([{ name: 'read', description: 'читать', parameters: { type: 'object' } }])
+  check('tool declarations are translated', () => {
+    const tools = serializeTools([{ name: 'read', description: 'read a file', parameters: { type: 'object' } }])
     assert.strictEqual(tools[0].function.name, 'read')
     assert.deepStrictEqual(tools[0].function.parameters, { type: 'object' })
   })
 
-  check('инструмент без схемы получает пустую', () => {
+  check('a tool without a schema gets an empty one', () => {
     assert.deepStrictEqual(serializeTools([{ name: 'read' }])[0].function.parameters, {
       type: 'object', properties: {},
     })
   })
 
-  check('отсутствие инструментов не создаёт поле', () => {
+  check('the absence of tools does not create the field', () => {
     assert.strictEqual(serializeTools(undefined), undefined)
     assert.strictEqual(serializeTools([]), undefined)
   })
 }
 
-// --- разбор потока ---
+// --- stream parsing ---
 
 async function testSse() {
-  await checkAsync("текст становится блоком", async () => {
-    const events = await drain(streamOf([frame({ choices: [{ delta: { content: "привет" } }] })]))
+  await checkAsync("text becomes a block", async () => {
+    const events = await drain(streamOf([frame({ choices: [{ delta: { content: "hello" } }] })]))
     const start = events.find((e) => e.type === "block-start")
-    assert.ok(start, "нет открытия блока")
+    assert.ok(start, "no block opening")
     assert.strictEqual(start.blockType, "text")
   })
-  await checkAsync("размышления отделяются от текста", async () => {
-    const events = await drain(streamOf([frame({ choices: [{ delta: { reasoning_content: "думаю" } }] })]))
+  await checkAsync("reasoning is separated from text", async () => {
+    const events = await drain(streamOf([frame({ choices: [{ delta: { reasoning_content: "thinking" } }] })]))
     assert.strictEqual(events.find((e) => e.type === "block-start").blockType, "reasoning")
   })
-  await checkAsync("поток заканчивается признаком завершения", async () => {
+  await checkAsync("the stream ends with a finish marker", async () => {
     const events = await drain(streamOf([frame({ choices: [{ delta: { content: "x" }, finish_reason: "stop" }] })]))
     const finish = events.find((e) => e.type === "finish")
-    assert.ok(finish, "нет признака завершения")
+    assert.ok(finish, "no finish marker")
     assert.strictEqual(finish.reason.kind, "stop")
   })
 
-  await checkAsync("сведения о расходе доходят", async () => {
+  await checkAsync("usage information comes through", async () => {
     const events = await drain(streamOf([frame({ usage: { prompt_tokens: 10, completion_tokens: 5 } })]))
     assert.strictEqual(events.find((e) => e.type === "usage").usage.outputTokens, 5)
   })
 }
 
-// --- запуск ---
+// --- running ---
 
 async function main() {
   testCatalog()
@@ -292,18 +295,18 @@ async function main() {
 
 function report() {
   if (failures.length === 0) {
-    console.log(`все проверки пройдены: ${passed}`)
+    console.log(`all checks passed: ${passed}`)
     return
   }
-  console.error(`провалов: ${failures.length} из ${passed + failures.length}`)
+  console.error(`failures: ${failures.length} out of ${passed + failures.length}`)
   for (const { label, error } of failures) {
-    console.error(`  ПРОВАЛ: ${label}`)
+    console.error(`  FAILURE: ${label}`)
     console.error(`    ${error.message}`)
   }
   process.exitCode = 1
 }
 
 main().catch((error) => {
-  console.error("прогон прерван:", error)
+  console.error("run aborted:", error)
   process.exitCode = 1
 })
