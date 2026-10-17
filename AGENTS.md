@@ -1,101 +1,104 @@
-# AGENTS.md — free-ai-router-plugin
+# AGENTS.md — free-ai-router-dshplugin
 
-Правила работы с этим репозиторием.
+Rules for working in this repository.
 
-## Сборка, коммит и пуш — делает агент, сам
+## Build, commit and push — the agent does it itself
 
-**Это главное правило репозитория.** Никаких напоминаний не требуется: после
-каждого законченного изменения агент сам проходит цикл и публикует результат.
+**This is the main rule of the repository.** No reminders are needed: after every
+finished change the agent runs the cycle and publishes the result on its own.
 
-### Полный цикл
+### The full cycle
 
 ```sh
-# 1. Синтаксис каждого модуля
+# 1. Syntax of every module
 for f in lib/*.cjs lib/*.js test/*.cjs; do node --check "$f" || echo "FAIL $f"; done
 
-# 2. Проверки
+# 2. Checks
 node test/smoke.cjs
 
-# 3. Публикация
+# 3. Publication
 git add -A
 git status --short
 git diff --cached --stat
 ```
 
-Коммит и пуш:
+Commit and push:
 
 ```sh
 git -c user.name="kyomufs" -c user.email="kyomufsdev@gmail.com" commit -F - <<'EOF'
-<тип>: <что изменилось и почему>
+<type>: <what changed and why>
 
-<тело: причина, а не пересказ диффа>
+<body: the reason, not a retelling of the diff>
 EOF
 
 TOKEN=$(grep -o 'ghp_[A-Za-z0-9]*' /home/kyomufs/.dsh/profiles/web/cordis.patch.yml | head -1)
-git push "https://kyomufs:$TOKEN@github.com/kyomufs/free-ai-router-plugin.git" HEAD:main \
+git push "https://kyomufs:$TOKEN@github.com/kyomufs/free-ai-router-dshplugin.git" HEAD:main \
   2>&1 | sed 's/ghp_[A-Za-z0-9]*/***/g'
 ```
 
-### Секреты
+### Secrets
 
-**Перед каждым коммитом:**
+**Before every commit:**
 
 ```sh
 grep -rn "ghp_\|sk-[A-Za-z0-9]" --include="*.cjs" --include="*.js" --include="*.json" . \
   | grep -v node_modules | head
 ```
 
-Пусто — хорошо. Токен для пуша берётся из `cordis.patch.yml` и **никогда** не
-попадает в файлы. В выводе он всегда маскируется.
+Empty is good. The push token is read from `cordis.patch.yml` and **never** lands
+in a file. It is always masked in the output.
 
-### Что не коммитить
+### What not to commit
 
-`node_modules/` — есть в `.gitignore`.
+`node_modules/` — it is in `.gitignore`.
 
-## Структура
+## Structure
 
-Модули разделены **по вопросу**, а не по удобству:
+Modules are split **by question**, not by convenience:
 
-| Модуль | Отвечает на вопрос |
+| Module | The question it answers |
 |---|---|
-| `daemon.cjs` | что плагин знает о шлюзе: адрес, токен, каталог |
-| `adapter.cjs` | как провайдер представлен харнессу |
-| `stream.cjs` | как вызов переводится в запрос и обратно |
-| `sse.cjs` | как кадры потока переводятся в события (без сети) |
+| `daemon.cjs` | what the plugin knows about the gateway: address, token, catalog |
+| `adapter.cjs` | how a provider is presented to the harness |
+| `stream.cjs` | how a call turns into a request and back |
+| `sse.cjs` | how stream frames turn into events (no network) |
 
-Новый код идёт в тот модуль, чей вопрос он решает. Файл, отвечающий на два
-вопроса сразу, — сигнал, что граница проведена неверно.
+New code goes into the module whose question it answers. A file answering two
+questions at once is a signal that the boundary was drawn wrong.
 
-## Граница ответственности
+## Boundary of responsibility
 
-**Плагин — посредник, а не второй шлюз.** Он переводит вызов и разбор, и
-ничего больше. Проверять это легко: если код делает что-то из списка ниже, он
-написан не там.
+**The plugin is a mediator, not a second gateway.** It translates the call and
+the stream, and nothing more. The check is easy: if the code does something from
+the list below, it is written in the wrong place.
 
-Плагин **не делает**:
+The plugin does **not**:
 
-- не подменяет форму запроса — у каждого провайдера она своя, и знает о ней
-  шлюз;
-- не хранит ключи — они у шлюза, у плагина их нет вовсе;
-- не выбирает транспорт;
-- не повторяет запросы — у харнесса своя политика повторов, и вторая политика
-  поверх неё сломала бы её расчёт;
-- не разбирает тело отказа — он передаёт его **дословно**, потому что харнесс
-  ищет в нём признаки, по которым принимает решение.
+- reshape the request — the shape belongs to each provider, and the gateway
+  knows it;
+- keep keys — they live in the gateway; the plugin has none;
+- choose the transport;
+- retry — the harness owns the retry policy, and a second policy on top of it
+  would break the harness's own arithmetic;
+- parse the body of a refusal — it passes it through **verbatim**, because the
+  harness looks in it for the signals it decides by;
+- invent a model capability — the cache holds what the gateway reported, and an
+  undeclared capability is omitted, never defaulted.
 
-Дублирование любого из этих решений означало бы два места, где одно и то же
-делается по-разному.
+Duplicating any of these decisions would mean two places where the same thing is
+done differently.
 
-## Проверки
+## Tests
 
-Проверяются **границы плагина**, а не работа шлюза: разбор состава моделей,
-перевод сообщений и разбор потока. Сеть в проверках не используется — шлюз
-подменяется подставкой.
+The plugin's **boundaries** are checked, not the gateway's work: reading the
+model catalog, translating messages, parsing the stream, and the shape of a
+refusal on the wire. No network is used — the gateway is replaced by a stub.
 
-Где проверка утверждает форму (например, разбивку составного идентификатора),
-она делает это **самостоятельно**, а не вызывает реализацию: проверка обязана
-заметить изменение реализации, а не повторять её.
+Where a check asserts a shape (for example the split of a composite identifier),
+it does so **on its own** instead of calling the implementation: a check has to
+notice a change in the implementation, not echo it.
 
-## Комментарии
+## Comments
 
-На русском, как и остальной текст в коде. Объясняют **почему**, а не что.
+In English, like the rest of the text in the code. They explain **why**, not
+what.

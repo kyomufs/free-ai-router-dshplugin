@@ -1,6 +1,6 @@
 'use strict'
 
-// Checks for the free-ai-router-plugin.
+// Checks for the free-ai-router-dshplugin.
 //
 // WHAT IS CHECKED. The plugin is an intermediary between the harness and the
 // gateway. So exactly the boundaries are checked: how it understands the
@@ -95,7 +95,7 @@ function testCatalog() {
 
   check('the communication module exports what is needed', () => {
     const daemon = require('../lib/daemon.cjs')
-    for (const name of ['BASE', 'headers', 'listProviders', 'ping']) {
+    for (const name of ['BASE', 'headers', 'listProviders', 'ping', 'modelMeta', 'rememberCatalog']) {
       assert.ok(name in daemon, `missing export ${name}`)
     }
   })
@@ -105,12 +105,48 @@ function testCatalog() {
     assert.strictEqual(daemon.headers(false)['content-type'], undefined)
     assert.strictEqual(daemon.headers(true)['content-type'], 'application/json')
   })
+
+  check('every request is attributed', () => {
+    // Attribution is part of the adapter contract and it is never suppressed.
+    // The plain read is checked too: the catalog request is a request like any
+    // other, and it is the one that runs before anything else.
+    const daemon = require('../lib/daemon.cjs')
+    for (const json of [false, true]) {
+      const agent = daemon.headers(json)['user-agent']
+      assert.ok(typeof agent === 'string' && agent.length > 0, 'no user-agent')
+      assert.ok(agent.includes('/'), `the agent is not product/version: ${agent}`)
+    }
+  })
+
+  check('the catalog is remembered for the per-call lookup', () => {
+    // One answer describes every model at once. The lookup that runs on every
+    // request reads the cache instead of asking the gateway again.
+    const daemon = require('../lib/daemon.cjs')
+    const byProvider = daemon.rememberCatalog({
+      data: [
+        { id: 'opencode/beam-free', name: 'Beam Free', context_length: 1048576 },
+        { id: 'openrouter/poolside/laguna-s-2.1:free' },
+        { id: 'providerless', object: 'model' },
+      ],
+    })
+
+    assert.ok(byProvider.has('opencode'), 'no provider in the grouping')
+    assert.ok(byProvider.get('opencode').includes('beam-free'))
+    // The slashes that belong to the model identifier itself stay in it.
+    assert.deepStrictEqual(byProvider.get('openrouter'), ['poolside/laguna-s-2.1:free'])
+    // An identifier without a provider names no route and is skipped.
+    assert.ok(!byProvider.has('providerless'), 'a providerless identifier was grouped')
+
+    assert.strictEqual(daemon.modelMeta('opencode', 'beam-free').context_length, 1048576)
+    assert.deepStrictEqual(daemon.modelMeta('opencode', 'unknown'), {}, 'an unknown model must report nothing')
+  })
 }
 
 // --- adapter ---
 
 function testAdapter() {
-  const { createAdapter, DEFAULT_EFFORTS } = require('../lib/adapter.cjs')
+  const { createAdapter } = require('../lib/adapter.cjs')
+  const daemon = require('../lib/daemon.cjs')
 
   check('the adapter is created for its own provider', () => {
     assert.strictEqual(createAdapter(stubCtx, 'zenmux').providerInfo('zenmux').id, 'zenmux')
@@ -156,18 +192,169 @@ function testAdapter() {
     }
   })
 
-  check('model metadata contains the mandatory fields', () => {
-    const info = createAdapter(stubCtx, 'opencode').modelInfo('model')
-    assert.strictEqual(info.provider, 'opencode')
-    assert.ok(info.context.contextWindow > 0, 'no window size')
-    assert.ok(info.defaultMaxTokens > 0, 'no response limit')
-    assert.ok(Array.isArray(info.inputModalities))
-    assert.ok(Array.isArray(info.reasoning.efforts))
-    assert.ok(info.reasoning.defaultEffort)
+  check('a model the gateway never described gets no invented limits', () => {
+    // The old plugin filled these in from constants. The harness validates
+    // them strictly — a zero window is an error, not a default — so a
+    // substitute number is either a rejection or a lie about a limit nobody
+    // knows. Absence is the only honest answer.
+    const info = createAdapter(stubCtx, 'nowhere').modelInfo('undescribed')
+
+    assert.strictEqual(info.provider, 'nowhere')
+    assert.strictEqual(info.id, 'undescribed')
+    assert.strictEqual(info.name, 'undescribed', 'the identifier stands in for a name')
+    assert.strictEqual(info.context, undefined, 'a context window was invented')
+    assert.strictEqual(info.defaultMaxTokens, undefined, 'a token ceiling was invented')
+    assert.deepStrictEqual(info.inputModalities, ['text'], 'text is the floor, not a guess')
+    assert.strictEqual(info.reasoning, undefined, 'a reasoning ladder was invented')
   })
 
-  check('the effort ladder matches the client one', () => {
-    assert.deepStrictEqual(DEFAULT_EFFORTS, ['off', 'low', 'high', 'max'])
+  check('declared capabilities reach the model metadata', () => {
+    daemon.rememberCatalog({
+      data: [{
+        id: 'somewhere/vision-model',
+        name: 'Vision Model',
+        context_length: 1048576,
+        max_completion_tokens: 131072,
+        input_modalities: ['text', 'image'],
+        reasoning_efforts: ['low', 'high', 'high', 'max'],
+      }],
+    })
+
+    const info = createAdapter(stubCtx, 'somewhere').modelInfo('vision-model')
+    assert.strictEqual(info.name, 'Vision Model')
+    assert.deepStrictEqual(info.context, { contextWindow: 1048576 })
+    assert.strictEqual(info.defaultMaxTokens, 131072)
+    assert.deepStrictEqual(info.inputModalities, ['text', 'image'])
+
+    // The ladder is the provider's own spelling, order preserved, duplicates
+    // dropped: the harness rejects a ladder that names a level twice.
+    assert.deepStrictEqual(info.reasoning.efforts.map((e) => e.id), ['low', 'high', 'max'])
+    assert.ok(info.reasoning.efforts.every((e) => typeof e.name === 'string' && e.name.length > 0))
+    // The default has to be one of the declared levels, or the harness rejects
+    // the whole metadata block.
+    assert.ok(info.reasoning.efforts.some((e) => e.id === info.reasoning.defaultEffort))
+  })
+
+  check('an unusable capability is left out rather than zeroed', () => {
+    // A provider may answer with a zero or a string where a number is
+    // expected. Both are "not declared", and neither may become a limit.
+    daemon.rememberCatalog({
+      data: [{
+        id: 'somewhere/odd-model',
+        context_length: 0,
+        max_completion_tokens: 'many',
+        input_modalities: [''],
+        reasoning_efforts: [],
+      }],
+    })
+
+    const info = createAdapter(stubCtx, 'somewhere').modelInfo('odd-model')
+    assert.strictEqual(info.context, undefined)
+    assert.strictEqual(info.defaultMaxTokens, undefined)
+    assert.deepStrictEqual(info.inputModalities, ['text'])
+    assert.strictEqual(info.reasoning, undefined)
+  })
+}
+
+// --- refusals ---
+
+function testRefusal() {
+  const { providerRetryAfterMs, failureCode, buildBody } = require('../lib/stream.cjs')
+
+  check('the wait is read from both header forms', () => {
+    assert.strictEqual(providerRetryAfterMs(new Headers({ 'retry-after-ms': '1500' })), 1500)
+    assert.strictEqual(providerRetryAfterMs(new Headers({ 'retry-after': '30' })), 30000)
+  })
+
+  check('an absent wait stays absent', () => {
+    // The harness validates the field: a present-but-unusable value fails the
+    // whole attempt, and zero is rejected along with NaN. Absence is how "no
+    // wait was asked for" is said.
+    for (const headers of [
+      new Headers(),
+      new Headers({ 'retry-after-ms': '0' }),
+      new Headers({ 'retry-after': '0' }),
+      new Headers({ 'retry-after-ms': 'soon' }),
+      new Headers({ 'retry-after': '-5' }),
+    ]) {
+      assert.strictEqual(providerRetryAfterMs(headers), undefined, `headers: ${JSON.stringify([...headers])}`)
+    }
+  })
+
+  check('a stable refusal is classified as a failure, not as a wait', () => {
+    assert.strictEqual(failureCode(429, ''), 'RATE_LIMIT')
+    assert.strictEqual(failureCode(500, ''), 'SERVER')
+    assert.strictEqual(failureCode(418, ''), 'PROVIDER_ERROR')
+  })
+
+  check('the token allowance is sent only when it was set', () => {
+    // A number written here would override the provider's own ceiling with a
+    // guess, and the guess is wrong for most models: the same free tier
+    // declares limits from thirty-two thousand to a hundred and thirty-one
+    // thousand. An absent field leaves the decision where the knowledge is.
+    const adapter = { provider: 'opencode' }
+    const bare = buildBody(adapter, { model: 'm', messages: [] })
+    assert.strictEqual(bare.model, 'opencode/m')
+    assert.strictEqual('max_tokens' in bare, false, 'an allowance was invented')
+
+    const asked = buildBody(adapter, { model: 'm', messages: [], maxTokens: 1234 })
+    assert.strictEqual(asked.max_tokens, 1234)
+  })
+}
+
+// --- the refusal on the wire ---
+
+async function testRefusalOnTheWire() {
+  const { createStreamer } = require('../lib/stream.cjs')
+
+  // The retry scheduler looks for exactly providerRetryAfterMs on the failure
+  // snapshot. The same value under any other name is invisible to it: the
+  // harness then retries on its own schedule, straight back into a service
+  // that has just said "later". That is why the FIELD NAME is asserted here
+  // and not only the value.
+  await checkAsync('a refusal carries the wait under the name the scheduler reads', async () => {
+    const original = globalThis.fetch
+    globalThis.fetch = async () => new Response('quota exhausted', {
+      status: 429,
+      headers: { 'retry-after': '30' },
+    })
+    try {
+      let caught
+      try {
+        for await (const _event of createStreamer({ provider: 'opencode' }, { model: 'm', messages: [] })) {
+          // no events are expected from a refusal
+        }
+      } catch (error) {
+        caught = error
+      }
+      assert.ok(caught, 'the refusal was swallowed')
+      assert.strictEqual(caught.code, 'RATE_LIMIT')
+      assert.strictEqual(caught.failure.providerRetryAfterMs, 30000)
+      assert.strictEqual(caught.failure.retryAfterMs, undefined, 'the old field name came back')
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
+  await checkAsync('a refusal with no wait carries no wait field', async () => {
+    const original = globalThis.fetch
+    globalThis.fetch = async () => new Response('nope', { status: 403 })
+    try {
+      let caught
+      try {
+        for await (const _event of createStreamer({ provider: 'opencode' }, { model: 'm', messages: [] })) {
+          // no events are expected from a refusal
+        }
+      } catch (error) {
+        caught = error
+      }
+      assert.ok(caught, 'the refusal was swallowed')
+      // Absence, not zero: the harness rejects a present-but-unusable value
+      // and zero is rejected along with NaN.
+      assert.strictEqual('providerRetryAfterMs' in caught.failure, false)
+    } finally {
+      globalThis.fetch = original
+    }
   })
 }
 
@@ -175,12 +362,18 @@ async function testAdapterAsync() {
   const { createAdapter } = require('../lib/adapter.cjs')
   const adapter = createAdapter(stubCtx, 'opencode')
 
-  // An unfamiliar model is resolved with defaults: the gateway may have
-  // announced it only just now, while the plugin catalog refreshes later.
-  await checkAsync('an unfamiliar model is resolved with defaults', async () => {
+// An unfamiliar model is resolved with what is known about it, which may be
+  // nothing: the gateway may have announced it only just now, while the plugin
+  // catalog refreshes later.
+  await checkAsync('an unfamiliar model is resolved without invented limits', async () => {
     const info = await adapter.resolveModel('opencode', 'never-heard-of-it')
+    assert.strictEqual(info.provider, 'opencode')
     assert.strictEqual(info.id, 'never-heard-of-it')
-    assert.ok(info.context.contextWindow > 0)
+    assert.ok(info.name.length > 0, 'the harness requires a non-empty name')
+    // A catalog refresh is all it takes for the capabilities to appear, and
+    // until then the plugin says nothing instead of guessing.
+    const afterRefresh = adapter.modelInfo('big-pickle')
+    assert.strictEqual(afterRefresh.id, 'big-pickle')
   })
 }
 
@@ -343,8 +536,10 @@ async function testSse() {
 async function main() {
   testCatalog()
   testAdapter()
+  testRefusal()
   testMessages()
   await testAdapterAsync()
+  await testRefusalOnTheWire()
   await testSse()
   report()
 }

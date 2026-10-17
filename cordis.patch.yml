@@ -1,4 +1,4 @@
 - insert:
-    - id: free-ai-router-plugin
-      name: free-ai-router-plugin
+    - id: free-ai-router-dshplugin
+      name: free-ai-router-dshplugin
       inject: [llm]

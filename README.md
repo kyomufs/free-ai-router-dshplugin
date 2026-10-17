@@ -1,69 +1,98 @@
-# free-ai-router-plugin
+# free-ai-router-dshplugin
 
-Бесплатные модели от нескольких провайдеров в DeepSeek Harness — через
-локальный шлюз [free-ai-router](https://github.com/kyomufs/free-ai-router).
+Free models from several providers inside DeepSeek Harness, through the local
+[free-ai-router](https://github.com/kyomufs/free-ai-router) gateway.
 
-Каждый провайдер, который обслуживает шлюз, появляется в селекторе моделей
-**отдельным маршрутом**. Добавление нового провайдера не требует выпуска
-плагина: достаточно секции в конфигурации шлюза.
+Every provider the gateway serves appears in the model selector as its **own
+route**. Adding a provider needs no plugin release: a section in the gateway
+configuration is enough.
 
-## Установка
+## Install
 
 ```sh
-dsh plugin --profile web add github:kyomufs/free-ai-router-plugin
+dsh plugin --profile web add github:kyomufs/free-ai-router-dshplugin
 ```
 
-Перезапустите `dsh web` — маршруты появятся в выборе моделей.
+Restart `dsh web` — the routes appear in the model picker.
 
-## Как это работает
+## How it works
 
 ```
-агент (DSH) ──▶ free-ai-router-plugin ──▶ free-ai-router ──▶ провайдер
-                        │                        │
-                   перевод вызова          форма запроса,
-                   и разбора потока        ключи, транспорт
+harness (DSH) ──▶ free-ai-router-dshplugin ──▶ free-ai-router ──▶ provider
+                        │                           │
+                  call translation            request shape,
+                  and stream parsing          keys, transport
 ```
 
-Плагин при запуске спрашивает у шлюза список провайдеров и регистрирует
-каждого отдельным маршрутом. Если шлюз ещё не поднят, регистрируется маршрут по
-умолчанию, а остальные подтягиваются позже — перезапускать харнесс из-за
-порядка запуска не нужно.
+On startup the plugin asks the gateway for the list of providers and registers
+each one as a separate route. If the gateway is not up yet, the default route is
+registered and the rest arrive later — no harness restart is needed for startup
+ordering.
 
-## Что плагин НЕ делает
+## What the plugin does not do
 
-Это важно для понимания границы ответственности:
+This is the boundary, and it is deliberate:
 
-- **не подменяет форму запроса** — этим занимается шлюз, и у каждого
-  провайдера форма своя;
-- **не хранит ключи** — они у шлюза, у плагина их нет вовсе;
-- **не решает, как выходить в сеть** — транспорт тоже принадлежит шлюзу;
-- **не повторяет запросы** — у харнесса своя политика повторов, и вторая
-  политика поверх неё сломала бы её расчёт.
+- **it does not reshape the request** — the gateway does that, and the shape
+  differs per provider;
+- **it does not keep keys** — the keys live in the gateway; the plugin has none;
+- **it does not choose the egress path** — the transport belongs to the gateway
+  too;
+- **it does not retry** — the harness owns the retry policy, and a second policy
+  on top of it would break the harness's own arithmetic.
 
-Отказы плагин передаёт **дословно**: статус, тело и заголовки от шлюза доходят
-без изменений, чтобы харнесс применял свою логику к тому же ответу, который
-увидел бы при прямом обращении.
+Refusals are passed through **verbatim**: status, body and headers reach the
+harness unchanged, so the harness applies its logic to the same answer it would
+have seen talking to the provider directly.
 
-## Настройка
+## Model capabilities
 
-| Переменная | Назначение | По умолчанию |
+The plugin never invents a limit. Context window, output ceiling, input
+modalities and the reasoning ladder are read from the gateway's `/v1/models`
+answer, which is the only party that knows them, and a capability the gateway
+did not declare is **omitted rather than filled in**: the harness validates
+these fields strictly, so a substitute number is either a rejection or a lie
+about a limit nobody knows.
+
+## Retry shape
+
+The policy handed to the harness is returned **already resolved**, with the
+delays on the top level next to the mode. The retry scheduler reads them from
+there and does not unwrap a nested backoff; a descriptive form reaches it as "no
+delays" and the delay is computed from NaN.
+
+A wait the provider asked for travels under the name the scheduler reads,
+`providerRetryAfterMs`, and is omitted entirely when the provider asked for no
+wait: the harness rejects a present-but-unusable value, zero included.
+
+## Attribution
+
+Every request carries a `user-agent`. The value comes from the harness package
+when it is resolvable, and from the plugin's own name and version otherwise —
+never from a string copied into the source, which would drift on the next
+release.
+
+## Configuration
+
+| Variable | Purpose | Default |
 |---|---|---|
-| `FREE_AI_ROUTER_BASE` | адрес шлюза без пути | `http://127.0.0.1:8787` |
-| `FREE_AI_ROUTER_TOKEN` | токен для режима `server` | пусто |
+| `FREE_AI_ROUTER_BASE` | gateway address, no path | `http://127.0.0.1:8787` |
+| `FREE_AI_ROUTER_TOKEN` | token for `server` mode | empty |
 
-`FREE_AI_ROUTER_TOKEN` — **другой** секрет, нежели ключ провайдера. Ключ
-открывает доступ к сервису, токен — к вашему шлюзу. Пустое значение — норма для
-режима `local`: до loopback-слушателя кроме этой машины никто не дотянется.
+`FREE_AI_ROUTER_TOKEN` is a **different** secret from a provider key: a key opens
+access to the service, the token opens access to your gateway. An empty value is
+normal for `local` mode — nobody but this machine can reach a loopback listener.
 
-## Проверки
+## Tests
 
 ```sh
 npm test
 ```
 
-Проверяются границы плагина: разбор состава моделей шлюза, перевод сообщений и
-разбор потока. Сеть не используется — шлюз подменяется подставкой.
+The plugin's boundaries are checked: how it reads the gateway catalog, how it
+translates messages, how it parses the stream, and how a refusal crosses the
+wire. No network is used — the gateway is replaced by a stub.
 
-## Лицензия
+## License
 
 MIT

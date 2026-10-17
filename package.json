@@ -1,7 +1,7 @@
 {
-  "name": "free-ai-router-plugin",
+  "name": "free-ai-router-dshplugin",
   "description": "Free AI providers for DeepSeek Harness, through a local free-ai-router daemon. Every provider the daemon serves appears as its own route.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "commonjs",
   "main": "lib/index.js",
   "exports": {
@@ -30,9 +30,9 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/kyomufs/free-ai-router-plugin.git"
+    "url": "https://github.com/kyomufs/free-ai-router-dshplugin.git"
   },
-  "homepage": "https://github.com/kyomufs/free-ai-router-plugin",
+  "homepage": "https://github.com/kyomufs/free-ai-router-dshplugin",
   "keywords": [
     "dsh",
     "dsh-plugin",
