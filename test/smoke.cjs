@@ -280,6 +280,62 @@ async function testSse() {
     const events = await drain(streamOf([frame({ usage: { prompt_tokens: 10, completion_tokens: 5 } })]))
     assert.strictEqual(events.find((e) => e.type === "usage").usage.outputTokens, 5)
   })
+
+  // The closing tool-call block must satisfy the harness contract exactly.
+  // This checks the SHAPE and not only the values, because the defect it
+  // guards against was a shape defect: the block used to carry `content`
+  // instead of `arguments` and no name at all, and the harness refused to
+  // record the event, failing the whole turn. Asserting the field names is
+  // what makes that failure impossible to reintroduce.
+  await checkAsync("a tool call closes as a contract-shaped block", async () => {
+    const events = await drain(streamOf([
+      frame({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "read", arguments: '{"path"' } }] } }] }),
+      frame({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: ':"/x"}' } }] } }] }),
+    ]))
+
+    const end = events.find((e) => e.type === "block-end" && e.block?.type === "tool-call")
+    assert.ok(end, "no tool-call block was closed")
+
+    // Required by the contract, and the reason the turn used to fail.
+    assert.strictEqual(end.block.name, "read", "the block carries no tool name")
+    assert.strictEqual(end.block.arguments, '{"path":"/x"}', "the arguments were not accumulated")
+    // The field the block used to carry instead. Its presence would mean the
+    // old shape came back.
+    assert.strictEqual(end.block.content, undefined, "the block carries a stray content field")
+
+    // A block has to be JSON-serializable, which is what the harness needs
+    // when it records the event.
+    assert.doesNotThrow(() => JSON.stringify(end.block))
+  })
+
+  // A tool call the service never named cannot be dispatched: there would be
+  // no tool to call. It is dropped rather than passed on, so the rest of the
+  // turn survives.
+  await checkAsync("an unnamed tool call is dropped, not closed", async () => {
+    const events = await drain(streamOf([
+      frame({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", function: { arguments: "{}" } }] } }] }),
+    ]))
+    const blocks = events.filter((e) => e.type === "block-end" && e.block?.type === "tool-call")
+    assert.strictEqual(blocks.length, 0, "an unnamed tool call must not be closed")
+  })
+
+  // The id is required on the delta and on the closing block alike. A service
+  // that omits it would otherwise drop the field, and an absent property is a
+  // different shape from a present one — the harness refuses the event on
+  // shape, so a missing id fails the turn just as a missing name does.
+  await checkAsync("a tool call without a service id still gets one", async () => {
+    const events = await drain(streamOf([
+      frame({ choices: [{ delta: { tool_calls: [{ index: 0, function: { name: "read", arguments: "{}" } }] } }] }),
+    ]))
+
+    const delta = events.find((e) => e.type === "tool-call-delta")
+    const end = events.find((e) => e.type === "block-end" && e.block?.type === "tool-call")
+
+    assert.ok(delta && typeof delta.id === "string" && delta.id.length > 0, "the delta carries no id")
+    assert.ok(end && typeof end.block.id === "string" && end.block.id.length > 0, "the block carries no id")
+    // Both must agree, or the result cannot be correlated with its call.
+    assert.strictEqual(end.block.id, delta.id, "the delta and the block disagree on the id")
+  })
 }
 
 // --- running ---
