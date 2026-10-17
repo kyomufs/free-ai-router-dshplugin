@@ -1,7 +1,7 @@
 {
-  "name": "dsh-opencode-zen",
-  "description": "OpenCode Zen free models + CLI disguise headers for DeepSeek Harness. Bypasses FreeTierError since 2026-09-16.",
-  "version": "0.17.0",
+  "name": "free-ai-router-plugin",
+  "description": "Free AI providers for DeepSeek Harness, through a local free-ai-router daemon. Every provider the daemon serves appears as its own route.",
+  "version": "1.0.0",
   "type": "commonjs",
   "main": "lib/index.js",
   "exports": {
@@ -30,23 +30,17 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/kyomufs/dsh-opencode-zen.git"
+    "url": "https://github.com/kyomufs/free-ai-router-plugin.git"
   },
-  "homepage": "https://github.com/kyomufs/dsh-opencode-zen",
+  "homepage": "https://github.com/kyomufs/free-ai-router-plugin",
   "keywords": [
     "dsh",
     "dsh-plugin",
-    "opencode",
-    "zen",
-    "free",
+    "free-ai-router",
+    "free-models",
     "llm",
     "provider",
-    "disguise",
-    "cli-headers",
-    "quota",
-    "rate-limit",
-    "ipv4",
-    "ipv6",
-    "diagnostics"
+    "aggregator",
+    "multi-provider"
   ]
 }
