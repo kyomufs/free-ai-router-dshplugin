@@ -54,6 +54,22 @@ did not declare is **omitted rather than filled in**: the harness validates
 these fields strictly, so a substitute number is either a rejection or a lie
 about a limit nobody knows.
 
+## Images
+
+A photo attached in the harness reaches the model as an `image_url` part with a
+`data:` URL — the only form the gateway accepts, since it never fetches an
+address on the client's behalf. The bytes are read from the harness attachment
+service through the durable reference the message carries, once per attachment,
+and scaled into the route's image budget (4 Mpx, 1 MiB) without enlarging them.
+
+An image the harness marked `offloaded` is **not** re-sent: that flag is the
+harness's own decision to keep it out of the request, made when a previous
+attempt hit an image budget. The model sees a note in its place instead, so it
+reports an omission rather than answering about an image it never received.
+
+A route whose harness has no attachment service fails the call with
+`UNSUPPORTED_CONTENT` instead of quietly sending a text-only request.
+
 ## Retry shape
 
 The policy handed to the harness is returned **already resolved**, with the

@@ -431,8 +431,57 @@ function testMessages() {
     assert.strictEqual(messages[0].content, '(no output)')
   })
 
-  check('tool declarations are translated', () => {
-    const tools = serializeTools([{ name: 'read', description: 'read a file', parameters: { type: 'object' } }])
+  check('an image reaches the request as a data URL beside the text', () => {
+    // The defect this guards against was total: every non-text block was
+    // dropped, so the model was asked about an image it had never received and
+    // answered that no image was attached. The block is asserted down to the
+    // encoding, because a wrong field name here means a silently text-only
+    // request all over again.
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47])
+    const messages = serializeMessages(
+      [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'what colour?' },
+          { type: 'image', attachment: { attachmentId: 'sha256:abc', mediaType: 'image/png', width: 4, height: 4 } },
+        ],
+      }],
+      '',
+      new Map([['sha256:abc', { mediaType: 'image/png', data: bytes }]]),
+    )
+
+    const content = messages[0].content
+    assert.ok(Array.isArray(content), 'the message was flattened to text')
+    assert.deepStrictEqual(content[0], { type: 'text', text: 'what colour?' })
+    assert.strictEqual(content[1].type, 'image_url')
+    assert.strictEqual(content[1].image_url.url, `data:image/png;base64,${bytes.toString('base64')}`)
+  })
+
+  check('a message without images keeps the plain string form', () => {
+    const messages = serializeMessages([{ role: 'user', content: [{ type: 'text', text: 'hello' }] }], '')
+    assert.strictEqual(messages[0].content, 'hello')
+  })
+
+  check('an offloaded image is named, not sent', () => {
+    // offloaded:true is the harness's own decision to keep the image out of the
+    // request. Re-sending it would undo that, and dropping it without a word
+    // leaves the model claiming it saw nothing.
+    const messages = serializeMessages(
+      [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'and this one?' },
+          { type: 'image', offloaded: true, attachment: { attachmentId: 'sha256:abc', mediaType: 'image/png' } },
+        ],
+      }],
+      '',
+      new Map(),
+    )
+    assert.strictEqual(typeof messages[0].content, 'string')
+    assert.ok(messages[0].content.includes('image omitted'), messages[0].content)
+  })
+
+  check('tool declarations are translated', () => {    const tools = serializeTools([{ name: 'read', description: 'read a file', parameters: { type: 'object' } }])
     assert.strictEqual(tools[0].function.name, 'read')
     assert.deepStrictEqual(tools[0].function.parameters, { type: 'object' })
   })
@@ -446,6 +495,93 @@ function testMessages() {
   check('the absence of tools does not create the field', () => {
     assert.strictEqual(serializeTools(undefined), undefined)
     assert.strictEqual(serializeTools([]), undefined)
+  })
+}
+
+// --- images on the wire ---
+
+async function testImagesOnTheWire() {
+  const { createStreamer } = require('../lib/stream.cjs')
+
+  // The bytes live in the harness attachment service, and the request is built
+  // from them. This checks the whole path a person's photo takes: the reference
+  // is read through the service, and what leaves for the gateway carries the
+  // image itself.
+  await checkAsync('the image is read from the attachment service and sent', async () => {
+    const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0])
+    const asked = []
+    const ctx = {
+      get: (name) => name !== 'attachments' ? undefined : {
+        async readImageRequest(ref, target) {
+          asked.push({ ref, target })
+          return { mediaType: 'image/jpeg', data: bytes, width: target.width, height: target.height }
+        },
+      },
+    }
+
+    const original = globalThis.fetch
+    let sent
+    globalThis.fetch = async (_url, init) => {
+      sent = JSON.parse(init.body)
+      return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: 'red' } }] })}\n\n`, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    }
+    try {
+      const adapter = { provider: 'opencode', ctx }
+      const messages = [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'what colour?' },
+          { type: 'image', attachment: { attachmentId: 'sha256:abc', width: 8, height: 4 } },
+        ],
+      }]
+      for await (const _event of createStreamer(adapter, { model: 'vl-free', messages })) {
+        // the events themselves are covered elsewhere
+      }
+    } finally {
+      globalThis.fetch = original
+    }
+
+    assert.strictEqual(asked.length, 1, 'the image was not read from the attachment service')
+    // The target is the route's budget, not the source size: a route that
+    // asked for the original would send a provider more than it priced.
+    assert.strictEqual(asked[0].target.maxBytes, 1048576)
+    assert.strictEqual(asked[0].target.width, 8)
+
+    const content = sent.messages[0].content
+    assert.ok(Array.isArray(content), 'the request carried no image parts')
+    assert.strictEqual(content[1].image_url.url, `data:image/jpeg;base64,${bytes.toString('base64')}`)
+  })
+
+  // A route whose harness has no attachment service cannot send an image at
+  // all. Failing loudly is the only honest answer: the alternative is a request
+  // the model answers as if nothing had been attached.
+  await checkAsync('an image with no attachment service fails instead of vanishing', async () => {
+    const original = globalThis.fetch
+    globalThis.fetch = async () => {
+      throw new Error('the request must not reach the gateway')
+    }
+    try {
+      let caught
+      try {
+        const adapter = { provider: 'opencode', ctx: stubCtx }
+        const messages = [{
+          role: 'user',
+          content: [{ type: 'image', attachment: { attachmentId: 'sha256:abc', width: 8, height: 4 } }],
+        }]
+        for await (const _event of createStreamer(adapter, { model: 'vl-free', messages })) {
+          // no events are expected
+        }
+      } catch (error) {
+        caught = error
+      }
+      assert.ok(caught, 'the image was silently dropped')
+      assert.strictEqual(caught.code, 'UNSUPPORTED_CONTENT')
+    } finally {
+      globalThis.fetch = original
+    }
   })
 }
 
